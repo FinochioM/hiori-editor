@@ -6,6 +6,8 @@ import ttf "vendor:sdl2/ttf"
 
 @(private)
 GUTTER_WIDTH :: 48
+@(private)
+STATUS_BAR_H :: 24
 
 run :: proc() {
 	if sdl2.Init(sdl2.INIT_VIDEO) != 0 {
@@ -51,6 +53,11 @@ run :: proc() {
 	buf := buffer_make()
 	defer buffer_destroy(&buf)
 
+	spotlight: Spotlight
+	current_file: string
+	modified: bool
+	scroll_y: i32
+
 	line_skip := ttf.FontLineSkip(font.inner)
 
 	running := true
@@ -66,31 +73,150 @@ run :: proc() {
 				for n < len(text) && text[n] != 0 {
 					n += 1
 				}
-				buffer_insert_bytes(&buf, text[:n])
+				if spotlight.open {
+					spotlight_type(&spotlight, text[:n])
+				} else {
+					buffer_insert_bytes(&buf, text[:n])
+					modified = true
+				}
 			case .KEYDOWN:
+				ctrl := ev.key.keysym.mod & sdl2.KMOD_CTRL != {}
+				shift := ev.key.keysym.mod & sdl2.KMOD_SHIFT != {}
 				#partial switch ev.key.keysym.sym {
 				case .ESCAPE:
-					running = false
+					if spotlight.open {
+						spotlight_close(&spotlight)
+					} else {
+						running = false
+					}
+				case .p:
+					if ctrl && shift {
+						spotlight_open_command_list(&spotlight)
+					}
+				case .o:
+					if ctrl {
+						spotlight_open_input(&spotlight, .Open_File, "Open file:")
+					}
+				case .s:
+					if ctrl && !spotlight.open {
+						if current_file != "" {
+							_file_save_direct(&buf, current_file)
+							modified = false
+						} else {
+							spotlight_open_input(&spotlight, .Save_File, "Save as:")
+						}
+					}
+				case .z:
+					if ctrl && !spotlight.open {
+						buffer_undo(&buf)
+						modified = true
+					}
+				case .y:
+					if ctrl && !spotlight.open {
+						buffer_redo(&buf)
+						modified = true
+					}
 				case .BACKSPACE:
-					buffer_delete_before(&buf)
+					if spotlight.open {
+						spotlight_backspace(&spotlight)
+					} else {
+						buffer_delete_before(&buf)
+						modified = true
+					}
 				case .DELETE:
-					buffer_delete_after(&buf)
+					if !spotlight.open {
+						buffer_delete_after(&buf)
+						modified = true
+					}
 				case .RETURN:
-					buffer_insert_byte(&buf, '\n')
+					if spotlight.open {
+						switch spotlight.mode {
+						case .Command:
+							if ci, ok := spotlight_selected_command(&spotlight); ok {
+								action := commands_all()[ci].action
+								if command_try_execute(action, &buf, &current_file, &modified) {
+									spotlight_close(&spotlight)
+								} else {
+									prompt: cstring =
+										"Open file:" if action == .Open_File else "Save as:"
+									spotlight_open_input(&spotlight, action, prompt)
+								}
+							}
+						case .Input:
+							command_execute_with_input(
+								spotlight.pending,
+								spotlight_input_string(&spotlight),
+								&buf,
+								&current_file,
+								&modified,
+							)
+							spotlight_close(&spotlight)
+						}
+					} else {
+						buffer_insert_byte(&buf, '\n')
+						modified = true
+					}
+				case .UP:
+					if spotlight.open {
+						spotlight_move(&spotlight, -1)
+					} else {
+						buffer_move_up(&buf)
+					}
+				case .DOWN:
+					if spotlight.open {
+						spotlight_move(&spotlight, 1)
+					} else {
+						buffer_move_down(&buf)
+					}
 				case .LEFT:
-					cur := buffer_cursor(&buf)
-					if cur > 0 do buffer_move_cursor(&buf, cur - 1)
+					if !spotlight.open {
+						cur := buffer_cursor(&buf)
+						if cur > 0 do buffer_move_cursor(&buf, cur - 1)
+					}
 				case .RIGHT:
-					cur := buffer_cursor(&buf)
-					buffer_move_cursor(&buf, cur + 1)
+					if !spotlight.open {
+						cur := buffer_cursor(&buf)
+						buffer_move_cursor(&buf, cur + 1)
+					}
+				case .HOME:
+					if !spotlight.open {
+						if ctrl {
+							buffer_move_cursor(&buf, 0)
+						} else {
+							buffer_move_line_start(&buf)
+						}
+					}
+				case .END:
+					if !spotlight.open {
+						if ctrl {
+							buffer_move_cursor(&buf, buffer_len(&buf))
+						} else {
+							buffer_move_line_end(&buf)
+						}
+					}
 				}
+			}
+		}
+
+		{
+			_, cy_doc := _cursor_screen_pos(&font, &buf, line_skip)
+			win_w, win_h: i32
+			sdl2.GetRendererOutputSize(renderer, &win_w, &win_h)
+			viewport_h := win_h - STATUS_BAR_H
+			if cy_doc < scroll_y {
+				scroll_y = cy_doc
+			}
+			if cy_doc + line_skip > scroll_y + viewport_h {
+				scroll_y = cy_doc + line_skip - viewport_h
 			}
 		}
 
 		sdl2.SetRenderDrawColor(renderer, 30, 30, 30, 255)
 		sdl2.RenderClear(renderer)
 
-		_render_buffer(renderer, &font, &buf, line_skip, sdl2.GetTicks())
+		_render_buffer(renderer, &font, &buf, line_skip, scroll_y, sdl2.GetTicks())
+		_render_status_bar(renderer, &font, current_file, modified, line_skip)
+		spotlight_render(&spotlight, renderer, &font, line_skip)
 
 		sdl2.RenderPresent(renderer)
 		sdl2.Delay(16)
@@ -127,11 +253,48 @@ _cursor_screen_pos :: proc(font: ^Font, buf: ^Buffer, line_skip: i32) -> (cx, cy
 }
 
 @(private)
+_render_status_bar :: proc(
+	renderer: ^sdl2.Renderer,
+	font: ^Font,
+	current_file: string,
+	modified: bool,
+	line_skip: i32,
+) {
+	win_w, win_h: i32
+	sdl2.GetRendererOutputSize(renderer, &win_w, &win_h)
+
+	bar := sdl2.Rect{0, win_h - STATUS_BAR_H, win_w, STATUS_BAR_H}
+	sdl2.SetRenderDrawColor(renderer, 40, 40, 45, 255)
+	sdl2.RenderFillRect(renderer, &bar)
+
+	ty := win_h - STATUS_BAR_H + (STATUS_BAR_H - line_skip) / 2
+
+	if current_file == "" {
+		font_render(font, renderer, "untitled", 8, ty, 120, 120, 130)
+	} else {
+		name_buf: [512]u8
+		n := min(len(current_file), len(name_buf) - 1)
+		copy(name_buf[:n], current_file[:n])
+		name_buf[n] = 0
+		font_render(font, renderer, cstring(&name_buf[0]), 8, ty, 180, 180, 190)
+	}
+
+	if modified {
+		font_render(font, renderer, "[+]", win_w - 40, ty, 180, 140, 80)
+	}
+}
+
+_file_save_direct :: proc(buf: ^Buffer, path: string) {
+	_file_save(buf, path)
+}
+
+@(private)
 _render_buffer :: proc(
 	renderer: ^sdl2.Renderer,
 	font: ^Font,
 	buf: ^Buffer,
 	line_skip: i32,
+	scroll_y: i32,
 	ticks: u32,
 ) {
 	line: [4096]u8
@@ -139,8 +302,12 @@ _render_buffer :: proc(
 	ln: int
 	line_num: int = 1
 	x: i32 = GUTTER_WIDTH
-	y: i32 = 8
+	y: i32 = 8 - scroll_y
 	blen := buffer_len(buf)
+
+	win_w, win_h: i32
+	sdl2.GetRendererOutputSize(renderer, &win_w, &win_h)
+	viewport_h := win_h - STATUS_BAR_H
 
 	_render_line_number :: proc(
 		renderer: ^sdl2.Renderer,
@@ -148,7 +315,10 @@ _render_buffer :: proc(
 		num_buf: []u8,
 		n: int,
 		y: i32,
+		line_skip: i32,
+		viewport_h: i32,
 	) {
+		if y + line_skip < 0 || y >= viewport_h do return
 		s := fmt.bprintf(num_buf, "%d", n)
 		num_buf[len(s)] = 0
 		w: i32
@@ -156,21 +326,22 @@ _render_buffer :: proc(
 		font_render(font, renderer, cstring(&num_buf[0]), GUTTER_WIDTH - w - 6, y, 80, 80, 80)
 	}
 
-	cx, cy := _cursor_screen_pos(font, buf, line_skip)
-	win_w: i32
-	win_h: i32
-	sdl2.GetRendererOutputSize(renderer, &win_w, &win_h)
-	highlight := sdl2.Rect{0, cy, win_w, line_skip}
-	sdl2.SetRenderDrawColor(renderer, 45, 45, 50, 255)
-	sdl2.RenderFillRect(renderer, &highlight)
+	cx, cy_doc := _cursor_screen_pos(font, buf, line_skip)
+	cy := cy_doc - scroll_y
 
-	_render_line_number(renderer, font, num_buf[:], line_num, y)
+	if cy >= 0 && cy < viewport_h {
+		highlight := sdl2.Rect{0, cy, win_w, line_skip}
+		sdl2.SetRenderDrawColor(renderer, 45, 45, 50, 255)
+		sdl2.RenderFillRect(renderer, &highlight)
+	}
+
+	_render_line_number(renderer, font, num_buf[:], line_num, y, line_skip, viewport_h)
 
 	for i := 0; i <= blen; i += 1 {
 		ch: u8 = 0 if i == blen else buffer_byte_at(buf, i)
 
 		if ch == '\n' || i == blen {
-			if ln > 0 {
+			if ln > 0 && y + line_skip >= 0 && y < viewport_h {
 				line[ln] = 0
 				font_render(font, renderer, cstring(&line[0]), x, y, 204, 204, 204)
 			}
@@ -178,15 +349,16 @@ _render_buffer :: proc(
 			ln = 0
 			line_num += 1
 			if i < blen {
-				_render_line_number(renderer, font, num_buf[:], line_num, y)
+				_render_line_number(renderer, font, num_buf[:], line_num, y, line_skip, viewport_h)
 			}
+			if y >= viewport_h do break
 		} else if ln < len(line) - 1 {
 			line[ln] = ch
 			ln += 1
 		}
 	}
 
-	if (ticks / 530) % 2 == 0 {
+	if (ticks / 530) % 2 == 0 && cy >= 0 && cy < viewport_h {
 		cursor_rect := sdl2.Rect{cx, cy, 2, line_skip}
 		sdl2.SetRenderDrawColor(renderer, 204, 204, 204, 255)
 		sdl2.RenderFillRect(renderer, &cursor_rect)
