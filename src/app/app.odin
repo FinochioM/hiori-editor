@@ -4,6 +4,9 @@ import "core:fmt"
 import "vendor:sdl2"
 import ttf "vendor:sdl2/ttf"
 
+@(private)
+GUTTER_WIDTH :: 48
+
 run :: proc() {
 	if sdl2.Init(sdl2.INIT_VIDEO) != 0 {
 		fmt.eprintln("SDL2 init failed:", sdl2.GetError())
@@ -87,7 +90,7 @@ run :: proc() {
 		sdl2.SetRenderDrawColor(renderer, 30, 30, 30, 255)
 		sdl2.RenderClear(renderer)
 
-		_render_buffer(renderer, &font, &buf, line_skip)
+		_render_buffer(renderer, &font, &buf, line_skip, sdl2.GetTicks())
 
 		sdl2.RenderPresent(renderer)
 		sdl2.Delay(16)
@@ -99,7 +102,7 @@ _cursor_screen_pos :: proc(font: ^Font, buf: ^Buffer, line_skip: i32) -> (cx, cy
 	cursor := buffer_cursor(buf)
 	line: [4096]u8
 	ln: int
-	cx = 8
+	cx = GUTTER_WIDTH
 	cy = 8
 
 	for i := 0; i < cursor; i += 1 {
@@ -117,19 +120,51 @@ _cursor_screen_pos :: proc(font: ^Font, buf: ^Buffer, line_skip: i32) -> (cx, cy
 		line[ln] = 0
 		w: i32
 		ttf.SizeUTF8(font.inner, cstring(&line[0]), &w, nil)
-		cx = 8 + w
+		cx = GUTTER_WIDTH + w
 	}
 
 	return
 }
 
 @(private)
-_render_buffer :: proc(renderer: ^sdl2.Renderer, font: ^Font, buf: ^Buffer, line_skip: i32) {
+_render_buffer :: proc(
+	renderer: ^sdl2.Renderer,
+	font: ^Font,
+	buf: ^Buffer,
+	line_skip: i32,
+	ticks: u32,
+) {
 	line: [4096]u8
+	num_buf: [16]u8
 	ln: int
-	x: i32 = 8
+	line_num: int = 1
+	x: i32 = GUTTER_WIDTH
 	y: i32 = 8
 	blen := buffer_len(buf)
+
+	_render_line_number :: proc(
+		renderer: ^sdl2.Renderer,
+		font: ^Font,
+		num_buf: []u8,
+		n: int,
+		y: i32,
+	) {
+		s := fmt.bprintf(num_buf, "%d", n)
+		num_buf[len(s)] = 0
+		w: i32
+		ttf.SizeUTF8(font.inner, cstring(&num_buf[0]), &w, nil)
+		font_render(font, renderer, cstring(&num_buf[0]), GUTTER_WIDTH - w - 6, y, 80, 80, 80)
+	}
+
+	cx, cy := _cursor_screen_pos(font, buf, line_skip)
+	win_w: i32
+	win_h: i32
+	sdl2.GetRendererOutputSize(renderer, &win_w, &win_h)
+	highlight := sdl2.Rect{0, cy, win_w, line_skip}
+	sdl2.SetRenderDrawColor(renderer, 45, 45, 50, 255)
+	sdl2.RenderFillRect(renderer, &highlight)
+
+	_render_line_number(renderer, font, num_buf[:], line_num, y)
 
 	for i := 0; i <= blen; i += 1 {
 		ch: u8 = 0 if i == blen else buffer_byte_at(buf, i)
@@ -141,14 +176,19 @@ _render_buffer :: proc(renderer: ^sdl2.Renderer, font: ^Font, buf: ^Buffer, line
 			}
 			y += line_skip
 			ln = 0
+			line_num += 1
+			if i < blen {
+				_render_line_number(renderer, font, num_buf[:], line_num, y)
+			}
 		} else if ln < len(line) - 1 {
 			line[ln] = ch
 			ln += 1
 		}
 	}
 
-	cx, cy := _cursor_screen_pos(font, buf, line_skip)
-	cursor_rect := sdl2.Rect{cx, cy, 2, line_skip}
-	sdl2.SetRenderDrawColor(renderer, 204, 204, 204, 255)
-	sdl2.RenderFillRect(renderer, &cursor_rect)
+	if (ticks / 530) % 2 == 0 {
+		cursor_rect := sdl2.Rect{cx, cy, 2, line_skip}
+		sdl2.SetRenderDrawColor(renderer, 204, 204, 204, 255)
+		sdl2.RenderFillRect(renderer, &cursor_rect)
+	}
 }
