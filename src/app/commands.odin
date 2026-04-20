@@ -6,6 +6,7 @@ import "core:strings"
 Command_Action :: enum {
 	Open_File,
 	Save_File,
+	Goto_Line,
 }
 
 Command :: struct {
@@ -18,6 +19,7 @@ Command :: struct {
 _commands := [?]Command {
 	{name = "Open File", shortcut = "Ctrl+O", action = .Open_File},
 	{name = "Save File", shortcut = "Ctrl+S", action = .Save_File},
+	{name = "Go to Line", shortcut = "Ctrl+G", action = .Goto_Line},
 }
 
 commands_all :: proc() -> []Command {
@@ -39,6 +41,8 @@ command_try_execute :: proc(
 		}
 	case .Open_File:
 	// ask for path everytime
+	case .Goto_Line:
+	// input needed
 	}
 	return false
 }
@@ -69,6 +73,23 @@ command_execute_with_input :: proc(
 		if current_file^ != "" do delete(current_file^)
 		current_file^ = strings.clone(path)
 		modified^ = false
+	case .Goto_Line:
+		target := 0
+		for ch in input {
+			if ch < '0' || ch > '9' do break
+			target = target * 10 + int(ch - '0')
+		}
+
+		if target < 1 do return
+
+		blen := buffer_len(buf)
+		line := 1
+		pos := 0
+		for pos < blen && line < target {
+			if buffer_byte_at(buf, pos) == '\n' do line += 1
+			pos += 1
+		}
+		buffer_move_cursor(buf, pos)
 	}
 }
 

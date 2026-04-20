@@ -131,6 +131,10 @@ run :: proc() {
 							find_open(&find)
 						}
 					}
+				case .g:
+					if ctrl && !spotlight.open {
+						spotlight_open_input(&spotlight, .Goto_Line, "Go to Line: ")
+					}
 				case .BACKSPACE:
 					if spotlight.open {
 						spotlight_backspace(&spotlight)
@@ -156,8 +160,15 @@ run :: proc() {
 								if command_try_execute(action, &buf, &current_file, &modified) {
 									spotlight_close(&spotlight)
 								} else {
-									prompt: cstring =
-										"Open file:" if action == .Open_File else "Save as:"
+									prompt: cstring
+									switch action {
+									case .Open_File:
+										prompt = "Open file:"
+									case .Save_File:
+										prompt = "Save as:"
+									case .Goto_Line:
+										prompt = "Go to line:"
+									}
 									spotlight_open_input(&spotlight, action, prompt)
 								}
 							}
