@@ -60,7 +60,6 @@ spotlight_move :: proc(s: ^Spotlight, delta: int) {
 	s.selected = (s.selected + delta + f.count) % f.count
 }
 
-// Returns index into commands_all() for the highlighted command.
 spotlight_selected_command :: proc(s: ^Spotlight) -> (index: int, ok: bool) {
 	if s.mode != .Command do return 0, false
 	f := _filter(s)

@@ -56,6 +56,7 @@ run :: proc() {
 	spotlight: Spotlight
 	current_file: string
 	modified: bool
+	find: Find
 	scroll_y: i32
 
 	line_skip := ttf.FontLineSkip(font.inner)
@@ -75,6 +76,10 @@ run :: proc() {
 				}
 				if spotlight.open {
 					spotlight_type(&spotlight, text[:n])
+				} else if find.active {
+					find_type(&find, text[:n])
+					find_search(&find, &buf)
+					find_jump_first(&find, &buf)
 				} else {
 					buffer_insert_bytes(&buf, text[:n])
 					modified = true
@@ -86,6 +91,8 @@ run :: proc() {
 				case .ESCAPE:
 					if spotlight.open {
 						spotlight_close(&spotlight)
+					} else if find.active {
+						find_close(&find)
 					} else {
 						running = false
 					}
@@ -116,9 +123,21 @@ run :: proc() {
 						buffer_redo(&buf)
 						modified = true
 					}
+				case .f:
+					if ctrl && !spotlight.open {
+						if find.active {
+							find_close(&find)
+						} else {
+							find_open(&find)
+						}
+					}
 				case .BACKSPACE:
 					if spotlight.open {
 						spotlight_backspace(&spotlight)
+					} else if find.active {
+						find_backspace(&find)
+						find_search(&find, &buf)
+						find_jump_first(&find, &buf)
 					} else {
 						buffer_delete_before(&buf)
 						modified = true
@@ -151,6 +170,12 @@ run :: proc() {
 								&modified,
 							)
 							spotlight_close(&spotlight)
+						}
+					} else if find.active {
+						if shift {
+							find_prev(&find, &buf)
+						} else {
+							find_next(&find, &buf)
 						}
 					} else {
 						buffer_insert_byte(&buf, '\n')
@@ -202,7 +227,8 @@ run :: proc() {
 			_, cy_doc := _cursor_screen_pos(&font, &buf, line_skip)
 			win_w, win_h: i32
 			sdl2.GetRendererOutputSize(renderer, &win_w, &win_h)
-			viewport_h := win_h - STATUS_BAR_H
+			extra := i32(FIND_BAR_H) if find.active else 0
+			viewport_h := win_h - STATUS_BAR_H - extra
 			if cy_doc < scroll_y {
 				scroll_y = cy_doc
 			}
@@ -214,8 +240,10 @@ run :: proc() {
 		sdl2.SetRenderDrawColor(renderer, 30, 30, 30, 255)
 		sdl2.RenderClear(renderer)
 
-		_render_buffer(renderer, &font, &buf, line_skip, scroll_y, sdl2.GetTicks())
+		extra_bottom := i32(FIND_BAR_H) if find.active else 0
+		_render_buffer(renderer, &font, &buf, line_skip, scroll_y, extra_bottom, sdl2.GetTicks())
 		_render_status_bar(renderer, &font, current_file, modified, line_skip)
+		find_render(&find, renderer, &font, line_skip)
 		spotlight_render(&spotlight, renderer, &font, line_skip)
 
 		sdl2.RenderPresent(renderer)
@@ -295,6 +323,7 @@ _render_buffer :: proc(
 	buf: ^Buffer,
 	line_skip: i32,
 	scroll_y: i32,
+	extra_bottom: i32,
 	ticks: u32,
 ) {
 	line: [4096]u8
@@ -307,7 +336,7 @@ _render_buffer :: proc(
 
 	win_w, win_h: i32
 	sdl2.GetRendererOutputSize(renderer, &win_w, &win_h)
-	viewport_h := win_h - STATUS_BAR_H
+	viewport_h := win_h - STATUS_BAR_H - extra_bottom
 
 	_render_line_number :: proc(
 		renderer: ^sdl2.Renderer,
